@@ -69,3 +69,56 @@ live API once network access is open.
 4. Is R = combo_mid / product(leg mids) clustered at 1.0 (independence pricing)?
 5. Spread on combos vs the sum of leg spreads.
 6. Size at the touch.
+
+## What the live API showed (2026-11-03 snapshot)
+
+Corrections to the SDK-based notes above:
+- The collections list comes back under the key `multivariate_contracts`, and a single
+  collection under `multivariate_contract`.
+- Per-game NBA collections (`KXMVENBASINGLEGAME-<game>`) were used through preseason
+  (last one closed 2026-10-08). Live NBA combos now sit in one exchange-wide collection,
+  `KXMVECROSSCATEGORY-R` (also `KXMVESPORTSMULTIGAMEEXTENDED-R`), which lists 55 NBA
+  events (game, spread, total, team total, 1H, 1Q, race-to-points) with `size_max: 1`
+  per event. Same-game combos are allowed by mixing events of the same game.
+- `active_quoters` was empty on every NBA event in the snapshot. Quoters are not
+  discoverable from this field right now.
+- Combo legs are in `mve_selected_legs` and also in `custom_strike` as comma lists
+  ("Associated Events", "Associated Markets", "Associated Market Sides").
+- Combo markets carry no `rules_primary`; settlement is inherited from the legs.
+- Combos price via RFQ (docs.kalshi.com/getting_started/rfqs), not a resting book.
+  The app sends an RFQ when a user builds a parlay; makers answer with private
+  yes_bid / no_bid quotes for the full size; the requester accepts one side; the maker
+  confirms within 3 seconds (combos are "High Volatility Markets"); the fill prints to
+  the public tape 1 second later. Quotes are private to requester and maker. A quote
+  with both sides must satisfy yes_bid + no_bid <= 1.
+- Consequence: of 4,504 NBA-only combos created in a one-hour window, zero had a
+  resting two-sided quote. The observable record of market-maker pricing is (a) the
+  public trade tape on combo markets and (b) quotes returned to our own RFQs.
+- Kalshi creates roughly 100+ combo markets per second exchange-wide (over one million
+  open combo markets). Full scans are not practical; the script scans by creation time
+  and filters to the sport.
+- Fee types confirmed from the API: the combo series use `quadratic_with_combo_maker_fees`
+  (multiplier 1); NBA game, spread and total series use `quadratic_with_maker_fees`;
+  NBA 1H, 1Q, team total and race series use plain `quadratic`.
+- Rate limits: Basic tier is 200 read tokens/s and 100 write tokens/s at 10 tokens per
+  call; unauthenticated calls hit 429 fast. Advanced tier is a free upgrade via
+  POST /account/api_usage_level/upgrade.
+- Demo environment exists (external-api.demo.kalshi.co) for testing the RFQ flow.
+
+First-look numbers (305 traded NBA combos, one hour, 2026-11-03 15:44 to 16:48 UTC):
+- Same-game combos are rare: 147 of 4,504 built, 10 of 305 traded.
+- Most traded combos are multi-game moneyline parlays of 4 to 10 legs.
+- R = trade VWAP / product of side-adjusted leg midpoints:
+  2-leg cross-game median 1.04 (n=11); 3-leg cross-game 1.04 (n=21);
+  4-leg cross-game 1.11 (n=36); 2-leg same-game 1.09 (n=5); 3-leg same-game 2.0 (n=3).
+  Cross-game R above 1 is the maker's margin on taker executions. Same-game R far
+  above 1 means positive correlation is being priced in, not independence.
+- Sample sizes are tiny and notional is small (about $3,100 across 305 combos).
+
+## Revised Phase 1 to-do
+1. Create RFQs ourselves on a fixed panel of 2-leg same-game combos (ML+spread, ML+total,
+   spread+total, team total pairs) and record the quotes without trading. Test whether
+   deleting unexecuted RFQs draws any maker penalty (docs penalize makers, not requesters).
+2. Keep logging the public trade tape for NBA combos on a schedule (every 15 minutes).
+3. Verify the 0.07 fee coefficient on the fee PDF from a normal browser.
+4. Request the Advanced rate-limit tier.
