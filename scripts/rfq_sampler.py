@@ -84,15 +84,17 @@ def build_panel(k, date, max_games):
         def leg(m, side):
             b, a = price_fields(m)
             return {"event": m["event_ticker"], "ticker": m["ticker"], "side": side, "title": m.get("title"), "bid": b, "ask": a}
+        # Kalshi rejects pairs where one leg implies the other (e.g. fav ML + fav spread yes,
+        # dog ML + fav spread no), so those are left out.
         pairs = [
-            ("favML_yes+favSpread_yes", [leg(fav, "yes"), leg(spread, "yes")]),
-            ("favML_yes+favSpread_no", [leg(fav, "yes"), leg(spread, "no")]),
-            ("dogML_yes+favSpread_no", [leg(dog, "yes"), leg(spread, "no")]),
+            ("favML_yes+favSpread_no", [leg(fav, "yes"), leg(spread, "no")]),   # fav wins but fails to cover
             ("favML_yes+over", [leg(fav, "yes"), leg(total, "yes")]),
             ("favML_yes+under", [leg(fav, "yes"), leg(total, "no")]),
             ("dogML_yes+over", [leg(dog, "yes"), leg(total, "yes")]),
+            ("dogML_yes+under", [leg(dog, "yes"), leg(total, "no")]),
             ("favSpread_yes+over", [leg(spread, "yes"), leg(total, "yes")]),
             ("favSpread_yes+under", [leg(spread, "yes"), leg(total, "no")]),
+            ("favSpread_no+under", [leg(spread, "no"), leg(total, "no")]),
         ]
         if fav_tt:
             pairs += [("favTT_over+over", [leg(fav_tt, "yes"), leg(total, "yes")]),
@@ -144,7 +146,7 @@ def main():
         return
 
     # 1. create combo markets and RFQs
-    active = []
+    active = []; my_user_id = None
     for g, pt, legs in panel:
         body = {"selected_markets": [{"event_ticker": l["event"], "market_ticker": l["ticker"], "side": l["side"]} for l in legs]}
         r = k.post(f"/multivariate_event_collections/{COLLECTION}", body)
@@ -155,25 +157,37 @@ def main():
                                              "obscure_creator_id": True, "replace_existing": True})
         if not r2.ok:
             print("  rfq failed", g, pt, mt, r2.status_code, r2.text[:200]); continue
-        rfq_id = r2.json().get("id") or r2.json().get("rfq", {}).get("id")
+        rj = r2.json(); rfq_id = rj.get("id") or rj.get("rfq", {}).get("id")
+        my_user_id = rj.get("creator_user_id") or rj.get("rfq", {}).get("creator_user_id") or my_user_id
+        if not my_user_id:  # the create response omits it; the single-RFQ read has it
+            try:
+                rr = k.get(f"/communications/rfqs/{rfq_id}"); my_user_id = (rr.get("rfq") or rr).get("creator_user_id")
+            except Exception as e:
+                print("  could not read back rfq", str(e)[:120])
         active.append({"game": g, "pair_type": pt, "legs": legs, "combo_ticker": mt, "rfq_id": rfq_id, "created": time.time(), "raw_create": r2.json()})
         print(f"  RFQ {rfq_id} on {mt} ({pt})")
-    print(f"{len(active)} RFQs open; waiting {a.wait}s for quotes")
-    time.sleep(a.wait)
-
-    # 2. collect quotes, then delete RFQs
+    print(f"{len(active)} RFQs open; polling quotes for {a.wait}s (rfq creator user id {my_user_id})")
+    # 2. poll quotes every few seconds (the quotes endpoint needs the RFQ creator's user id), then delete RFQs
+    seen = {x["rfq_id"]: {} for x in active}
+    t0 = time.time()
+    while time.time() - t0 < a.wait:
+        for x in active:
+            try:
+                for q in k.get("/communications/quotes", rfq_id=x["rfq_id"], rfq_creator_user_id=my_user_id, limit=500).get("quotes", []):
+                    if q.get("id") not in seen[x["rfq_id"]]:
+                        q["_first_seen_s"] = round(time.time() - x["created"], 1)
+                        seen[x["rfq_id"]][q["id"]] = q
+            except Exception as e:
+                print("  quotes fetch failed", x["rfq_id"], str(e)[:160]); break
+        time.sleep(4)
     quotes_rows = []
     for x in active:
-        qs = []
-        try:
-            qs = k.get("/communications/quotes", rfq_id=x["rfq_id"], limit=500).get("quotes", [])
-        except Exception as e:
-            print("  quotes fetch failed", x["rfq_id"], str(e)[:150])
+        qs = list(seen[x["rfq_id"]].values())
         x["quotes"] = qs
         for q in qs:
             quotes_rows.append({"run_ts": run_ts, "env": a.env, "rfq_id": x["rfq_id"], "combo_ticker": x["combo_ticker"], "game": x["game"], "pair_type": x["pair_type"],
                                 "quote_id": q.get("id"), "maker_id": q.get("creator_id"), "yes_bid": f(q.get("yes_bid_dollars")), "no_bid": f(q.get("no_bid_dollars")),
-                                "status": q.get("status"), "quote_created_ts": q.get("created_ts")})
+                                "status": q.get("status"), "quote_created_ts": q.get("created_ts"), "seconds_after_rfq": q.get("_first_seen_s")})
         rd = k.delete(f"/communications/rfqs/{x['rfq_id']}")
         x["delete_status"] = rd.status_code
     # 3. summarise
