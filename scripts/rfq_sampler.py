@@ -124,6 +124,7 @@ def main():
     ap.add_argument("--out", default="out/rfq")
     ap.add_argument("--dry-run", action="store_true", help="build the panel and stop before any signed write")
     ap.add_argument("--limit", type=int, default=0, help="only run the first N panel entries")
+    ap.add_argument("--show-id", action="store_true", help="do not hide our communications id from makers")
     a = ap.parse_args()
 
     key_id = os.environ.get("KALSHI_KEY_ID"); key_file = os.environ.get("KALSHI_KEY_FILE")
@@ -153,8 +154,13 @@ def main():
         if not r.ok:
             print("  create market failed", g, pt, r.status_code, r.text[:200]); continue
         mt = r.json().get("market_ticker")
-        r2 = k.post("/communications/rfqs", {"market_ticker": mt, "contracts_fp": a.contracts, "rest_remainder": False,
-                                             "obscure_creator_id": True, "replace_existing": True})
+        body2 = {"market_ticker": mt, "contracts_fp": a.contracts, "rest_remainder": False, "obscure_creator_id": not a.show_id}
+        r2 = k.post("/communications/rfqs", body2)   # never replace_existing: it cancels every other open RFQ we have
+        if r2.status_code == 409:  # an open RFQ of ours already exists on this market: delete it and retry once
+            for old in k.get("/communications/rfqs", user_filter="self", status="open", limit=100).get("rfqs", []):
+                if old.get("market_ticker") == mt:
+                    k.delete(f"/communications/rfqs/{old['id']}")
+            r2 = k.post("/communications/rfqs", body2)
         if not r2.ok:
             print("  rfq failed", g, pt, mt, r2.status_code, r2.text[:200]); continue
         rj = r2.json(); rfq_id = rj.get("id") or rj.get("rfq", {}).get("id")
@@ -199,7 +205,7 @@ def main():
         buy_yes = min([1 - f(q["no_bid_dollars"]) for q in live if f(q.get("no_bid_dollars"))], default=None)   # cheapest way for us to buy YES
         sell_yes = max([f(q["yes_bid_dollars"]) for q in live if f(q.get("yes_bid_dollars"))], default=None)   # best price to sell YES
         m = (buy_yes + sell_yes) / 2 if buy_yes is not None and sell_yes is not None else None
-        rows.append({"run_ts": run_ts, "env": a.env, "game": x["game"], "pair_type": x["pair_type"], "combo_ticker": x["combo_ticker"], "rfq_id": x["rfq_id"],
+        rows.append({"run_ts": run_ts, "env": a.env, "contracts": a.contracts, "id_hidden": not a.show_id, "game": x["game"], "pair_type": x["pair_type"], "combo_ticker": x["combo_ticker"], "rfq_id": x["rfq_id"],
                      "leg1": x["legs"][0]["ticker"], "leg1_side": x["legs"][0]["side"], "leg1_bid": x["legs"][0]["bid"], "leg1_ask": x["legs"][0]["ask"],
                      "leg2": x["legs"][1]["ticker"], "leg2_side": x["legs"][1]["side"], "leg2_bid": x["legs"][1]["bid"], "leg2_ask": x["legs"][1]["ask"],
                      "product_of_leg_mids": prod, "n_quotes": len(live), "n_makers": len({q.get("creator_id") for q in live}),
