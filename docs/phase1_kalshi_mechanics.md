@@ -122,3 +122,33 @@ First-look numbers (305 traded NBA combos, one hour, 2026-11-03 15:44 to 16:48 U
 2. Keep logging the public trade tape for NBA combos on a schedule (every 15 minutes).
 3. Verify the 0.07 fee coefficient on the fee PDF from a normal browser.
 4. Request the Advanced rate-limit tier.
+
+## RFQ sampler results (2026-11-03, production, 10 combos, CHA at BKN)
+
+Mechanics learned the hard way:
+- `replace_existing: true` on RFQ creation cancels every other open RFQ you have, not just
+  the one on that market. Leave it false.
+- GET /communications/quotes needs `rfq_creator_user_id` (our user id, readable from
+  GET /communications/rfqs/{id}); `user_filter=self` returns only quotes we authored.
+- Kalshi rejects combos where one leg implies another (fav ML + fav spread yes,
+  dog ML + fav spread no) with `duplicated_legs`.
+- The create-RFQ response does not include creator_user_id; read the RFQ back.
+- The app itself creates an RFQ every ~10 s while a user looks at a parlay and cancels it
+  when they move on (seen in our own RFQ history from the app session at 17:00 UTC).
+
+Who quotes and how:
+- 18 distinct makers answered within about 4 seconds. Three quoted all 10 combos.
+- Identity matters a lot. With `obscure_creator_id: true` makers quoted one side only
+  (they sell YES, never buy it) at roughly twice fair. With our id visible, the best makers
+  quoted two-sided with about a 5-cent spread, near fair. All future sampling runs with
+  the id visible.
+- Two-sided quotes mean shorting a combo (selling YES) is possible through RFQ.
+
+Pricing shape on the one game sampled (R = quote mid / product of leg mids):
+- ML + over and ML + under were quoted at the same price (0.297 vs 0.301 to buy), as were
+  dog ML + over/under (0.233 vs 0.244). Makers appear to treat moneyline and game total as
+  independent. Whether that is right is the first real research question.
+- Spread + total pairs: R about 0.92 to 0.99, also treated as roughly independent.
+- Fav ML + fav fails to cover (wins by 1 or 2): quoted 0.048 / 0.078. The product of
+  leg mids is meaningless here because the legs are strongly negatively correlated.
+- Team total + game total: R 1.40; team total + ML: R 1.24. Positive correlation priced in.
